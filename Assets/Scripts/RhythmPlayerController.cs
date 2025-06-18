@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 public class RhythmPlayerController : MonoBehaviour
 {
@@ -17,10 +18,25 @@ public class RhythmPlayerController : MonoBehaviour
     [Header("反馈设置")]
     public bool showTimingFeedback = true;
     
+    [Header("输入设置")]
+    public InputActionAsset inputActions;
+    
+    // Input Actions
+    private InputAction moveAction;
+    private InputAction toggleBeatModeAction;
+    
     // 输入状态
     private Vector2Int bufferedInput = Vector2Int.zero;
     private float inputBufferTimer = 0f;
     private bool hasBufferedInput = false;
+    
+    // 输入检测状态
+    private Vector2Int lastInputDirection = Vector2Int.zero;
+    private bool inputPressed = false;
+    
+    // 节拍窗口跟踪
+    private bool wasInActionWindow = false;
+    private bool hadInputInCurrentWindow = false;
     
     // 统计信息
     public int perfectHits = 0;
@@ -41,6 +57,9 @@ public class RhythmPlayerController : MonoBehaviour
         if (gridMovement == null)
             gridMovement = GetComponent<GridMovement>();
             
+        // 初始化Input System
+        InitializeInputSystem();
+            
         // 订阅节拍事件
         if (rhythmManager != null)
         {
@@ -55,8 +74,100 @@ public class RhythmPlayerController : MonoBehaviour
             Debug.LogError("RhythmPlayerController: 找不到GridMovement组件!");
     }
     
+    private void InitializeInputSystem()
+    {
+        // 如果没有指定InputActionAsset，创建默认的输入动作
+        if (inputActions == null)
+        {
+            CreateDefaultInputActions();
+        }
+        else
+        {
+            // 使用指定的InputActionAsset
+            moveAction = inputActions.FindAction("Move");
+            toggleBeatModeAction = inputActions.FindAction("ToggleBeatMode");
+        }
+        
+        // 启用输入动作
+        if (moveAction != null)
+        {
+            moveAction.Enable();
+        }
+        
+        if (toggleBeatModeAction != null)
+        {
+            toggleBeatModeAction.Enable();
+            toggleBeatModeAction.performed += OnToggleBeatMode;
+        }
+        
+        Debug.Log("Input System 初始化完成");
+    }
+    
+    private void CreateDefaultInputActions()
+    {
+        // 创建默认的移动输入动作
+        moveAction = new InputAction("Move", InputActionType.Value);
+        moveAction.AddCompositeBinding("2DVector")
+            .With("Up", "<Keyboard>/w")
+            .With("Up", "<Keyboard>/upArrow")
+            .With("Down", "<Keyboard>/s") 
+            .With("Down", "<Keyboard>/downArrow")
+            .With("Left", "<Keyboard>/a")
+            .With("Left", "<Keyboard>/leftArrow")
+            .With("Right", "<Keyboard>/d")
+            .With("Right", "<Keyboard>/rightArrow")
+            .With("Up", "<Gamepad>/leftStick/up")
+            .With("Down", "<Gamepad>/leftStick/down")
+            .With("Left", "<Gamepad>/leftStick/left")
+            .With("Right", "<Gamepad>/leftStick/right")
+            .With("Up", "<Gamepad>/dpad/up")
+            .With("Down", "<Gamepad>/dpad/down")
+            .With("Left", "<Gamepad>/dpad/left")
+            .With("Right", "<Gamepad>/dpad/right");
+            
+        // 创建切换节拍模式的输入动作
+        toggleBeatModeAction = new InputAction("ToggleBeatMode", InputActionType.Button);
+        toggleBeatModeAction.AddBinding("<Keyboard>/space");
+        toggleBeatModeAction.AddBinding("<Gamepad>/buttonSouth"); // A按钮 (Xbox) / X按钮 (PlayStation)
+        
+        Debug.Log("创建默认Input Actions");
+    }
+    
+    private void TrackActionWindow()
+    {
+        if (rhythmManager == null) return;
+        
+        bool currentlyInActionWindow = rhythmManager.IsInActionWindow();
+        
+        // 检测进入行动窗口
+        if (currentlyInActionWindow && !wasInActionWindow)
+        {
+            // 刚进入行动窗口，重置输入标记
+            hadInputInCurrentWindow = false;
+        }
+        // 检测离开行动窗口
+        else if (!currentlyInActionWindow && wasInActionWindow)
+        {
+            // 刚离开行动窗口，检查是否有输入
+            if (!hadInputInCurrentWindow)
+            {
+                // 在行动窗口内没有输入，计为错过
+                missedInputs++;
+                ShowTimingFeedback("错过机会", Color.gray);
+            }
+        }
+        
+        wasInActionWindow = currentlyInActionWindow;
+    }
+    
     void Update()
     {
+        // 跟踪行动窗口状态（仅在节拍模式下）
+        if (requireBeatTiming)
+        {
+            TrackActionWindow();
+        }
+        
         // 处理输入
         HandleInput();
         
@@ -88,55 +199,96 @@ public class RhythmPlayerController : MonoBehaviour
         }
         
         // 显示控制说明
-        GUI.Box(new Rect(10, Screen.height - 120, 200, 100), "控制说明");
-        GUI.Label(new Rect(20, Screen.height - 95, 180, 20), "WASD / 方向键: 移动");
-        GUI.Label(new Rect(20, Screen.height - 75, 180, 20), "按节拍输入获得加成");
-        GUI.Label(new Rect(20, Screen.height - 55, 180, 20), $"需要节拍: {(requireBeatTiming ? "是" : "否")}");
-        GUI.Label(new Rect(20, Screen.height - 35, 180, 20), "空格: 切换节拍要求");
+        GUI.Box(new Rect(10, Screen.height - 140, 200, 120), "控制说明");
+        GUI.Label(new Rect(20, Screen.height - 115, 180, 20), "WASD / 方向键: 移动");
+        GUI.Label(new Rect(20, Screen.height - 95, 180, 20), "按节拍输入获得加成");
+        GUI.Label(new Rect(20, Screen.height - 75, 180, 20), $"需要节拍: {(requireBeatTiming ? "是" : "否")}");
+        GUI.Label(new Rect(20, Screen.height - 55, 180, 20), "空格: 切换节拍要求");
+        GUI.Label(new Rect(20, Screen.height - 35, 180, 20), "错过: 时机不对 + 未操作");
     }
     
     private void HandleInput()
     {
         // 获取输入方向
-        Vector2Int inputDirection = GetInputDirection();
+        Vector2Int currentInputDirection = GetInputDirection();
         
-        if (inputDirection != Vector2Int.zero)
+        // 检测输入变化（模拟按下事件）
+        bool newInputDetected = false;
+        if (currentInputDirection != Vector2Int.zero && currentInputDirection != lastInputDirection)
         {
+            newInputDetected = true;
+        }
+        else if (currentInputDirection != Vector2Int.zero && !inputPressed)
+        {
+            newInputDetected = true;
+        }
+        
+        // 更新输入状态
+        inputPressed = currentInputDirection != Vector2Int.zero;
+        lastInputDirection = currentInputDirection;
+        
+        // 处理新的输入
+        if (newInputDetected)
+        {
+            // 标记在当前窗口内有输入（仅在节拍模式下）
+            if (requireBeatTiming && rhythmManager != null && rhythmManager.IsInActionWindow())
+            {
+                hadInputInCurrentWindow = true;
+            }
+            
             if (requireBeatTiming)
             {
                 // 需要按节拍输入
-                HandleRhythmInput(inputDirection);
+                HandleRhythmInput(currentInputDirection);
             }
             else
             {
                 // 自由移动模式
-                AttemptMove(inputDirection, 1f, RhythmManager.TimingType.Good);
+                AttemptMove(currentInputDirection, 1f, RhythmManager.TimingType.Good);
             }
-        }
-        
-        // 切换节拍要求
-        if (Input.GetKeyDown(KeyCode.Space))
-        {
-            requireBeatTiming = !requireBeatTiming;
-            Debug.Log($"节拍要求: {(requireBeatTiming ? "开启" : "关闭")}");
         }
     }
     
     private Vector2Int GetInputDirection()
     {
+        if (moveAction == null) return Vector2Int.zero;
+        
+        // 读取2D向量输入
+        Vector2 inputVector = moveAction.ReadValue<Vector2>();
+        
+        // 转换为离散的方向（只允许4个方向）
         Vector2Int direction = Vector2Int.zero;
         
-        // WASD 输入
-        if (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.UpArrow))
-            direction = Vector2Int.up;
-        else if (Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.DownArrow))
-            direction = Vector2Int.down;
-        else if (Input.GetKeyDown(KeyCode.A) || Input.GetKeyDown(KeyCode.LeftArrow))
-            direction = Vector2Int.left;
-        else if (Input.GetKeyDown(KeyCode.D) || Input.GetKeyDown(KeyCode.RightArrow))
-            direction = Vector2Int.right;
-            
+        // 使用阈值来判断输入方向，避免手柄轻微移动触发
+        float threshold = 0.5f;
+        
+        if (Mathf.Abs(inputVector.x) > Mathf.Abs(inputVector.y))
+        {
+            // 水平移动优先
+            if (inputVector.x > threshold)
+                direction = Vector2Int.right;
+            else if (inputVector.x < -threshold)
+                direction = Vector2Int.left;
+        }
+        else
+        {
+            // 垂直移动优先
+            if (inputVector.y > threshold)
+                direction = Vector2Int.up;
+            else if (inputVector.y < -threshold)
+                direction = Vector2Int.down;
+        }
+        
         return direction;
+    }
+    
+    private void OnToggleBeatMode(InputAction.CallbackContext context)
+    {
+        if (context.performed)
+        {
+            requireBeatTiming = !requireBeatTiming;
+            Debug.Log($"节拍要求: {(requireBeatTiming ? "开启" : "关闭")}");
+        }
     }
     
     private void HandleRhythmInput(Vector2Int direction)
@@ -297,6 +449,20 @@ public class RhythmPlayerController : MonoBehaviour
     
     void OnDestroy()
     {
+        // 清理Input System
+        if (moveAction != null)
+        {
+            moveAction.Disable();
+            moveAction.Dispose();
+        }
+        
+        if (toggleBeatModeAction != null)
+        {
+            toggleBeatModeAction.performed -= OnToggleBeatMode;
+            toggleBeatModeAction.Disable();
+            toggleBeatModeAction.Dispose();
+        }
+        
         // 取消事件订阅
         if (rhythmManager != null)
         {
