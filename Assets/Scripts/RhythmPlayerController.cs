@@ -1,11 +1,24 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 public class RhythmPlayerController : MonoBehaviour
 {
     [Header("组件引用")]
+    [Tooltip("节拍管理器，留空则自动查找")]
     public RhythmManager rhythmManager;
-    public GridMovement gridMovement;
+    
+
+    
+    // 网格大小（由GameManager设置，不在Inspector中显示）
+    [System.NonSerialized]
+    public float gridSize = 1f;
+    
+    [Header("移动设置")]
+    [Range(0.1f, 1f)]
+    public float moveDuration = 0.3f;
+    public AnimationCurve moveCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
     
     [Header("控制设置")]
     public bool requireBeatTiming = true;  // 是否要求按节拍输入
@@ -19,11 +32,21 @@ public class RhythmPlayerController : MonoBehaviour
     public bool showTimingFeedback = true;
     
     [Header("输入设置")]
+    [Tooltip("输入动作资源，留空则使用默认输入（WASD+方向键+手柄）")]
     public InputActionAsset inputActions;
+    
+    [Header("调试")]
+    public bool showCollisionBounds = false;
     
     // Input Actions
     private InputAction moveAction;
     private InputAction toggleBeatModeAction;
+    
+    // 移动状态
+    private bool isMoving = false;
+    private Vector3 startPosition;
+    private Vector3 targetPosition;
+    private float moveStartTime;
     
     // 输入状态
     private Vector2Int bufferedInput = Vector2Int.zero;
@@ -37,9 +60,10 @@ public class RhythmPlayerController : MonoBehaviour
     // 节拍窗口跟踪
     private bool wasInActionWindow = false;
     private bool hadInputInCurrentWindow = false;
+    private bool hadSuccessfulActionInCurrentWindow = false;  // 跟踪是否有成功的操作
+    private bool isFirstBeat = true;  // 跟踪是否是第一个节拍
     
     // 统计信息
-    public int perfectHits = 0;
     public int goodHits = 0;
     public int missedInputs = 0;
     
@@ -48,14 +72,18 @@ public class RhythmPlayerController : MonoBehaviour
     private float feedbackDisplayTime = 0f;
     private Color feedbackColor = Color.white;
     
+    // 事件
+    public System.Action<Vector3> OnMoveStart;
+    public System.Action<Vector3> OnMoveComplete;
+    
+    // 属性
+    public bool IsMoving => isMoving;
+    
     void Start()
     {
         // 自动获取组件引用
         if (rhythmManager == null)
             rhythmManager = FindObjectOfType<RhythmManager>();
-            
-        if (gridMovement == null)
-            gridMovement = GetComponent<GridMovement>();
             
         // 初始化Input System
         InitializeInputSystem();
@@ -70,8 +98,6 @@ public class RhythmPlayerController : MonoBehaviour
         // 检查必要组件
         if (rhythmManager == null)
             Debug.LogError("RhythmPlayerController: 找不到RhythmManager!");
-        if (gridMovement == null)
-            Debug.LogError("RhythmPlayerController: 找不到GridMovement组件!");
     }
     
     private void InitializeInputSystem()
@@ -142,18 +168,33 @@ public class RhythmPlayerController : MonoBehaviour
         // 检测进入行动窗口
         if (currentlyInActionWindow && !wasInActionWindow)
         {
-            // 刚进入行动窗口，重置输入标记
+            // 刚进入行动窗口，重置所有标记
             hadInputInCurrentWindow = false;
+            hadSuccessfulActionInCurrentWindow = false;
         }
         // 检测离开行动窗口
         else if (!currentlyInActionWindow && wasInActionWindow)
         {
-            // 刚离开行动窗口，检查是否有输入
-            if (!hadInputInCurrentWindow)
+            // 刚离开行动窗口，检查这个节拍区间的结果
+            // 但跳过第一个节拍的检查
+            if (!isFirstBeat && !hadSuccessfulActionInCurrentWindow)
             {
-                // 在行动窗口内没有输入，计为错过
+                // 这个节拍区间内没有成功操作，计为错过（不论是否有输入尝试）
                 missedInputs++;
-                ShowTimingFeedback("错过机会", Color.gray);
+                if (!hadInputInCurrentWindow)
+                {
+                    ShowTimingFeedback("错过机会", Color.gray);
+                }
+                else
+                {
+                    ShowTimingFeedback("时机错误", Color.red);
+                }
+            }
+            
+            // 第一个节拍结束后，取消第一节拍标记
+            if (isFirstBeat)
+            {
+                isFirstBeat = false;
             }
         }
         
@@ -162,6 +203,12 @@ public class RhythmPlayerController : MonoBehaviour
     
     void Update()
     {
+        // 处理移动动画
+        if (isMoving)
+        {
+            UpdateMovement();
+        }
+        
         // 跟踪行动窗口状态（仅在节拍模式下）
         if (requireBeatTiming)
         {
@@ -181,30 +228,46 @@ public class RhythmPlayerController : MonoBehaviour
     
     void OnGUI()
     {
-        // 显示统计信息
-        GUI.Box(new Rect(Screen.width - 200, 10, 180, 100), "玩家统计");
-        GUI.Label(new Rect(Screen.width - 190, 35, 170, 20), $"完美: {perfectHits}");
-        GUI.Label(new Rect(Screen.width - 190, 55, 170, 20), $"良好: {goodHits}");
-        GUI.Label(new Rect(Screen.width - 190, 75, 170, 20), $"错过: {missedInputs}");
+        // 放大字体
+        GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
+        labelStyle.fontSize = 24;
         
-        // 显示时机反馈
+        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
+        boxStyle.fontSize = 24;
+        
+        GUIStyle feedbackStyle = new GUIStyle(GUI.skin.label);
+        feedbackStyle.fontSize = 32;  // 反馈文字更大一些
+        feedbackStyle.fontStyle = FontStyle.Bold;
+        
+
+        
+        // 显示统计信息 (放大)
+        GUI.Box(new Rect(Screen.width - 400, 20, 360, 160), "玩家统计", boxStyle);
+        GUI.Label(new Rect(Screen.width - 380, 70, 340, 40), $"成功: {goodHits}", labelStyle);
+        GUI.Label(new Rect(Screen.width - 380, 110, 340, 40), $"错过: {missedInputs}", labelStyle);
+        
+        int totalInputs = goodHits + missedInputs;
+        float accuracy = totalInputs > 0 ? (float)goodHits / totalInputs * 100f : 0f;
+        GUI.Label(new Rect(Screen.width - 380, 150, 340, 40), $"准确率: {accuracy:F1}%", labelStyle);
+        
+        // 显示时机反馈 (放大)
         if (showTimingFeedback && feedbackDisplayTime > 0)
         {
             Vector3 playerScreenPos = Camera.main.WorldToScreenPoint(transform.position);
-            playerScreenPos.y = Screen.height - playerScreenPos.y + 30;
+            playerScreenPos.y = Screen.height - playerScreenPos.y + 60;
             
             GUI.color = feedbackColor;
-            GUI.Label(new Rect(playerScreenPos.x - 50, playerScreenPos.y, 100, 30), lastTimingFeedback);
+            GUI.Label(new Rect(playerScreenPos.x - 100, playerScreenPos.y, 200, 60), lastTimingFeedback, feedbackStyle);
             GUI.color = Color.white;
         }
         
-        // 显示控制说明
-        GUI.Box(new Rect(10, Screen.height - 140, 200, 120), "控制说明");
-        GUI.Label(new Rect(20, Screen.height - 115, 180, 20), "WASD / 方向键: 移动");
-        GUI.Label(new Rect(20, Screen.height - 95, 180, 20), "按节拍输入获得加成");
-        GUI.Label(new Rect(20, Screen.height - 75, 180, 20), $"需要节拍: {(requireBeatTiming ? "是" : "否")}");
-        GUI.Label(new Rect(20, Screen.height - 55, 180, 20), "空格: 切换节拍要求");
-        GUI.Label(new Rect(20, Screen.height - 35, 180, 20), "错过: 时机不对 + 未操作");
+        // 显示控制说明 (放大)
+        GUI.Box(new Rect(20, Screen.height - 280, 400, 240), "控制说明", boxStyle);
+        GUI.Label(new Rect(40, Screen.height - 230, 360, 40), "WASD / 方向键: 移动", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 190, 360, 40), "按节拍输入获得加成", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 150, 360, 40), $"需要节拍: {(requireBeatTiming ? "是" : "否")}", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 110, 360, 40), "空格: 切换节拍要求", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 70, 360, 40), "错过: 时机不对 + 未操作", labelStyle);
     }
     
     private void HandleInput()
@@ -231,7 +294,7 @@ public class RhythmPlayerController : MonoBehaviour
         if (newInputDetected)
         {
             // 标记在当前窗口内有输入（仅在节拍模式下）
-            if (requireBeatTiming && rhythmManager != null && rhythmManager.IsInActionWindow())
+            if (requireBeatTiming && rhythmManager != null)
             {
                 hadInputInCurrentWindow = true;
             }
@@ -312,9 +375,8 @@ public class RhythmPlayerController : MonoBehaviour
         }
         else
         {
-            // 输入时机不对
-            missedInputs++;
-            ShowTimingFeedback("错过时机!", Color.red);
+            // 输入时机不对，但不立即计错过，等节拍结束时统一处理
+            ShowTimingFeedback("时机不对", Color.red);
         }
     }
     
@@ -343,9 +405,8 @@ public class RhythmPlayerController : MonoBehaviour
         }
         else if (inputBufferTimer <= 0)
         {
-            // 缓冲时间用完
+            // 缓冲时间用完，但不计错过（在节拍结束时统一处理）
             ClearBufferedInput();
-            missedInputs++;
             ShowTimingFeedback("缓冲超时", Color.gray);
         }
     }
@@ -359,20 +420,153 @@ public class RhythmPlayerController : MonoBehaviour
     
     private void AttemptMove(Vector2Int direction, float timingBonus, RhythmManager.TimingType timing)
     {
-        if (gridMovement == null) return;
+        if (isMoving) return;
         
-        bool moveSuccessful = gridMovement.TryMove(direction, timingBonus);
+        // 计算目标世界位置
+        Vector3 targetWorldPos = transform.position + new Vector3(direction.x * gridSize, direction.y * gridSize, 0);
+        
+        // 检查是否可以移动到目标位置
+        bool moveSuccessful = IsValidPosition(targetWorldPos);
         
         if (moveSuccessful)
         {
-            // 移动成功，更新统计
+            // 移动成功，开始移动动画
+            StartMove(targetWorldPos, timingBonus);
             UpdateStats(timing);
             ShowTimingFeedback(GetTimingText(timing), GetTimingColor(timing));
         }
         else
         {
-            // 移动失败（可能被阻挡）
+            // 移动失败（被阻挡），但仍然算作成功响应节拍
+            UpdateStats(timing);
             ShowTimingFeedback("被阻挡", Color.yellow);
+        }
+        
+        // 无论移动是否成功，都标记为成功响应了节拍
+        if (requireBeatTiming)
+        {
+            hadSuccessfulActionInCurrentWindow = true;
+        }
+    }
+    
+    /// <summary>
+    /// 检查位置是否有效
+    /// </summary>
+    private bool IsValidPosition(Vector3 targetWorldPos)
+    {
+        // 获取自身的Collider2D组件
+        Collider2D ownCollider = GetComponent<Collider2D>();
+        if (ownCollider == null)
+        {
+            Debug.LogError($"RhythmPlayerController: {gameObject.name} 缺少Collider2D组件！移动功能需要Collider2D进行碰撞检测。");
+            return false; // 没有碰撞体则不允许移动
+        }
+        
+        // 计算Collider2D在目标位置的中心点
+        Vector2 colliderCenter = targetWorldPos + (Vector3)ownCollider.offset;
+        
+        // 使用OverlapPoint检测碰撞体中心位置是否有其他碰撞体
+        Collider2D hit = Physics2D.OverlapPoint(colliderCenter);
+        
+        // 如果碰撞到的是自身，则认为位置有效
+        return hit == null || hit == ownCollider;
+    }
+    
+    /// <summary>
+    /// 开始移动动画
+    /// </summary>
+    private void StartMove(Vector3 targetWorldPos, float timingBonus)
+    {
+        isMoving = true;
+        startPosition = transform.position;
+        targetPosition = targetWorldPos;
+        moveStartTime = Time.time;
+        
+        // 根据时机准确度调整移动时间
+        float adjustedDuration = moveDuration / timingBonus;
+        
+        OnMoveStart?.Invoke(targetWorldPos);
+        
+        StartCoroutine(MovementCoroutine(adjustedDuration));
+    }
+    
+    /// <summary>
+    /// 移动协程
+    /// </summary>
+    private IEnumerator MovementCoroutine(float duration)
+    {
+        float elapsedTime = 0f;
+        
+        while (elapsedTime < duration)
+        {
+            elapsedTime += Time.deltaTime;
+            float progress = elapsedTime / duration;
+            
+            // 使用动画曲线进行插值
+            float curveValue = moveCurve.Evaluate(progress);
+            transform.position = Vector3.Lerp(startPosition, targetPosition, curveValue);
+            
+            yield return null;
+        }
+        
+        // 确保最终位置正确
+        transform.position = targetPosition;
+        isMoving = false;
+        
+        OnMoveComplete?.Invoke(targetPosition);
+    }
+    
+    /// <summary>
+    /// 更新移动状态（备用方法，当前使用协程）
+    /// </summary>
+    private void UpdateMovement()
+    {
+        // 注意：当前使用协程进行移动，这个方法作为备用
+        float elapsedTime = Time.time - moveStartTime;
+        float progress = elapsedTime / moveDuration;
+        
+        if (progress >= 1f)
+        {
+            // 移动完成
+            transform.position = targetPosition;
+            isMoving = false;
+            OnMoveComplete?.Invoke(targetPosition);
+        }
+        else
+        {
+            // 继续移动
+            float curveValue = moveCurve.Evaluate(progress);
+            transform.position = Vector3.Lerp(startPosition, targetPosition, curveValue);
+        }
+    }
+    
+    /// <summary>
+    /// 直接设置位置（瞬间移动）
+    /// </summary>
+    public void SetPosition(Vector3 newPosition)
+    {
+        if (isMoving) return;
+        
+        transform.position = newPosition;
+    }
+    
+
+    
+
+    
+
+    
+    /// <summary>
+    /// 停止当前移动
+    /// </summary>
+    public void StopMovement()
+    {
+        if (isMoving)
+        {
+            StopAllCoroutines();
+            isMoving = false;
+            // 注意：移动中断后可能需要重新同步位置
+            // 如果需要精确同步，可以重新实现世界坐标转网格坐标的逻辑
         }
     }
     
@@ -394,8 +588,6 @@ public class RhythmPlayerController : MonoBehaviour
         switch (timing)
         {
             case RhythmManager.TimingType.Perfect:
-                perfectHits++;
-                break;
             case RhythmManager.TimingType.Good:
                 goodHits++;
                 break;
@@ -407,7 +599,6 @@ public class RhythmPlayerController : MonoBehaviour
         switch (timing)
         {
             case RhythmManager.TimingType.Perfect:
-                return "PERFECT!";
             case RhythmManager.TimingType.Good:
                 return "Good";
             default:
@@ -420,7 +611,6 @@ public class RhythmPlayerController : MonoBehaviour
         switch (timing)
         {
             case RhythmManager.TimingType.Perfect:
-                return Color.yellow;
             case RhythmManager.TimingType.Good:
                 return Color.green;
             default:
@@ -447,6 +637,49 @@ public class RhythmPlayerController : MonoBehaviour
         // 时机评估回调，可以用于额外的效果
     }
     
+    /// <summary>
+    /// 绘制调试信息
+    /// </summary>
+    void OnDrawGizmos()
+    {
+        if (showCollisionBounds)
+        {
+            // 获取自身Collider2D的大小和偏移
+            Collider2D ownCollider = GetComponent<Collider2D>();
+            Vector2 debugSize = Vector2.one; // 默认大小
+            Vector2 colliderOffset = Vector2.zero;
+            
+            if (ownCollider != null)
+            {
+                colliderOffset = ownCollider.offset;
+                
+                if (ownCollider is BoxCollider2D boxCollider)
+                {
+                    debugSize = boxCollider.size;
+                }
+                else if (ownCollider is CircleCollider2D circleCollider)
+                {
+                    float diameter = circleCollider.radius * 2f;
+                    debugSize = new Vector2(diameter, diameter);
+                }
+                // 可以根据需要添加其他类型的Collider2D
+            }
+            
+            // 绘制当前位置的碰撞检测区域（考虑Collider2D的offset）
+            Gizmos.color = Color.green;
+            Vector3 currentWorldPos = transform.position + (Vector3)colliderOffset;
+            Gizmos.DrawWireCube(currentWorldPos, debugSize);
+            
+            // 如果正在移动，也绘制目标位置的碰撞检测区域
+            if (isMoving)
+            {
+                Gizmos.color = Color.yellow;
+                Vector3 targetColliderPos = targetPosition + (Vector3)colliderOffset;
+                Gizmos.DrawWireCube(targetColliderPos, debugSize);
+            }
+        }
+    }
+    
     void OnDestroy()
     {
         // 清理Input System
@@ -469,5 +702,26 @@ public class RhythmPlayerController : MonoBehaviour
             rhythmManager.OnBeat.RemoveListener(OnBeat);
             rhythmManager.OnTimingEvaluated.RemoveListener(OnTimingEvaluated);
         }
+    }
+    
+    // 重置统计和状态
+    public void ResetStats()
+    {
+        goodHits = 0;
+        missedInputs = 0;
+        
+        // 重置节拍窗口跟踪状态
+        wasInActionWindow = false;
+        hadInputInCurrentWindow = false;
+        hadSuccessfulActionInCurrentWindow = false;
+        isFirstBeat = true;
+        
+        // 清空时机反馈
+        lastTimingFeedback = "";
+        feedbackDisplayTime = 0f;
+        feedbackColor = Color.white;
+        
+        // 清空缓冲输入
+        ClearBufferedInput();
     }
 } 

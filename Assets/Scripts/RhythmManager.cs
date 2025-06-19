@@ -84,28 +84,33 @@ public class RhythmManager : MonoBehaviour
     {
         if (!showDebugInfo) return;
         
-        GUI.Box(new Rect(10, 10, 300, 150), "节拍调试信息");
-        GUI.Label(new Rect(20, 35, 280, 20), $"BPM: {beatsPerMinute}");
-        GUI.Label(new Rect(20, 55, 280, 20), $"当前节拍: {currentBeat}");
-        GUI.Label(new Rect(20, 75, 280, 20), $"节拍进度: {CurrentBeatProgress:F2}");
-        GUI.Label(new Rect(20, 95, 280, 20), $"歌曲位置: {songPosition:F2}s");
-        GUI.Label(new Rect(20, 115, 280, 20), $"是否播放: {IsPlaying}");
+        // 放大字体
+        GUIStyle labelStyle = new GUIStyle(GUI.skin.label);
+        labelStyle.fontSize = 24;
         
-        // 节拍可视化条
-        Rect beatBar = new Rect(20, 135, 280, 20);
+        GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
+        boxStyle.fontSize = 24;
+        
+        GUI.Box(new Rect(20, 20, 600, 300), "节拍调试信息", boxStyle);
+        GUI.Label(new Rect(40, 70, 560, 40), $"BPM: {beatsPerMinute}", labelStyle);
+        GUI.Label(new Rect(40, 110, 560, 40), $"当前节拍: {currentBeat}", labelStyle);
+        GUI.Label(new Rect(40, 150, 560, 40), $"节拍进度: {CurrentBeatProgress:F2}", labelStyle);
+        GUI.Label(new Rect(40, 190, 560, 40), $"歌曲位置: {songPosition:F2}s", labelStyle);
+        GUI.Label(new Rect(40, 230, 560, 40), $"是否播放: {IsPlaying}", labelStyle);
+        
+        // 节拍可视化条 (放大)
+        Rect beatBar = new Rect(40, 270, 560, 40);
         GUI.Box(beatBar, "");
         
-        // 绘制节拍进度
+        // 绘制节拍进度 (使用DrawTexture绘制白色进度条)
         float progress = CurrentBeatProgress;
-        GUI.color = Color.green;
-        GUI.Box(new Rect(beatBar.x, beatBar.y, beatBar.width * progress, beatBar.height), "");
-        GUI.color = Color.white;
+        Rect progressRect = new Rect(beatBar.x, beatBar.y, beatBar.width * progress, beatBar.height);
+        GUI.DrawTexture(progressRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
         
-        // 绘制完美时机窗口
+        // 绘制完美时机窗口 (使用DrawTexture绘制黄色窗口)
         float perfectStart = (1f - perfectWindow) * beatBar.width;
-        GUI.color = Color.yellow;
-        GUI.Box(new Rect(beatBar.x + perfectStart, beatBar.y, perfectWindow * beatBar.width, beatBar.height), "");
-        GUI.color = Color.white;
+        Rect perfectRect = new Rect(beatBar.x + perfectStart, beatBar.y, perfectWindow * beatBar.width, beatBar.height);
+        GUI.DrawTexture(perfectRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.yellow, 0, 0);
     }
     
     public void StartMusic()
