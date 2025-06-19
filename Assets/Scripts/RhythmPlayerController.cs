@@ -22,17 +22,15 @@ public class RhythmPlayerController : MonoBehaviour
     
     [Header("控制设置")]
     public bool requireBeatTiming = true;  // 是否要求按节拍输入
-    public bool allowEarlyInput = true;    // 是否允许提前输入
     
-    [Header("输入缓冲")]
-    [Range(0f, 0.5f)]
-    public float inputBufferTime = 0.1f;   // 输入缓冲时间
+    [Header("输入设置")]
+    [Range(0.01f, 0.2f)]
+    public float minInputInterval = 0.05f;   // 最小操作间隔（防止重复输入）
     
     [Header("反馈设置")]
     public bool showTimingFeedback = true;
     
-    [Header("输入设置")]
-    [Tooltip("输入动作资源，留空则使用默认输入（WASD+方向键+手柄）")]
+    [Header("输入动作资源，留空则使用默认输入（WASD+方向键+手柄）")]
     public InputActionAsset inputActions;
     
     [Header("调试")]
@@ -48,10 +46,7 @@ public class RhythmPlayerController : MonoBehaviour
     private Vector3 targetPosition;
     private float moveStartTime;
     
-    // 输入状态
-    private Vector2Int bufferedInput = Vector2Int.zero;
-    private float inputBufferTimer = 0f;
-    private bool hasBufferedInput = false;
+    // 输入状态（输入缓冲已移除）
     
     // 输入检测状态
     private Vector2Int lastInputDirection = Vector2Int.zero;
@@ -62,6 +57,14 @@ public class RhythmPlayerController : MonoBehaviour
     private bool hadInputInCurrentWindow = false;
     private bool hadSuccessfulActionInCurrentWindow = false;  // 跟踪是否有成功的操作
     private bool isFirstBeat = true;  // 跟踪是否是第一个节拍
+    private bool hasTriedInputThisBeat = false;  // 跟踪当前节拍是否已经尝试过输入
+    private int lastBeatCount = -1;  // 跟踪上一次的节拍计数
+    
+    // 动态Good Window机制
+    private float nextAllowedInputTime = 0f;  // 下次允许操作的时间
+    private bool hasBeenInCurrentBeatWindow = false;  // 是否已经进入过当前节拍的Good Window
+    private float currentBeatCycleEndTime = 0f;  // 当前动态节拍周期的结束时间
+    private float nextBeatStartTime = 0f;  // 下个节拍的开始时间
     
     // 统计信息
     public int goodHits = 0;
@@ -81,19 +84,35 @@ public class RhythmPlayerController : MonoBehaviour
     
     void Start()
     {
-        // 自动获取组件引用
+        rhythmManager = FindObjectOfType<RhythmManager>();
         if (rhythmManager == null)
-            rhythmManager = FindObjectOfType<RhythmManager>();
-            
+        {
+            Debug.LogError("找不到RhythmManager！");
+            return;
+        }
+        
+        // 设置初始位置
+        transform.position = new Vector3(0, 0, 0);
+        
+        // 初始化第一个节拍周期
+        float beatInterval = rhythmManager.BeatInterval;
+        float firstBeatTime = beatInterval; // 第一个节拍发生在1个beatInterval后
+        float goodWindowEndTime = firstBeatTime + (rhythmManager.goodWindow * beatInterval);
+        currentBeatCycleEndTime = goodWindowEndTime;
+        nextBeatStartTime = firstBeatTime;
+        isFirstBeat = true;
+        
+        Debug.Log($"[初始化] BPM: {rhythmManager.bpm}, beatInterval: {beatInterval:F3}");
+        Debug.Log($"[初始化] goodWindow: {rhythmManager.goodWindow}, firstBeatTime: {firstBeatTime:F3}");
+        Debug.Log($"[初始化] goodWindowEndTime: {goodWindowEndTime:F3}");
+        Debug.Log($"[初始化] currentBeatCycleEndTime: {currentBeatCycleEndTime:F3}, nextBeatStartTime: {nextBeatStartTime:F3}");
+        
         // 初始化Input System
         InitializeInputSystem();
             
         // 订阅节拍事件
-        if (rhythmManager != null)
-        {
-            rhythmManager.OnBeat.AddListener(OnBeat);
-            rhythmManager.OnTimingEvaluated.AddListener(OnTimingEvaluated);
-        }
+        rhythmManager.OnBeat.AddListener(OnBeat);
+        rhythmManager.OnTimingEvaluated.AddListener(OnTimingEvaluated);
         
         // 检查必要组件
         if (rhythmManager == null)
@@ -163,37 +182,76 @@ public class RhythmPlayerController : MonoBehaviour
     {
         if (rhythmManager == null) return;
         
+        float currentTime = rhythmManager.CurrentSongPosition;
         bool currentlyInActionWindow = rhythmManager.IsInActionWindow();
+        
+        // 检查是否到达当前节拍周期结束时间
+        if (currentTime >= currentBeatCycleEndTime && hasTriedInputThisBeat)
+        {
+            Debug.Log($"[周期重置] 时间: {currentTime:F3}, 周期结束时间: {currentBeatCycleEndTime:F3}, 重置hasTriedInputThisBeat");
+            
+            // 当前节拍周期结束，重置标记并开始下个节拍周期
+            hasTriedInputThisBeat = false;
+            hasBeenInCurrentBeatWindow = false;
+            
+            // 如果没有设置下个节拍开始时间，使用当前时间
+            if (nextBeatStartTime == 0f)
+            {
+                nextBeatStartTime = currentTime;
+                Debug.Log($"[周期重置] 设置下个节拍开始时间为当前时间: {nextBeatStartTime:F3}");
+            }
+            else
+            {
+                Debug.Log($"[周期重置] 下个节拍开始时间已设置为: {nextBeatStartTime:F3}");
+            }
+        }
+        
+        // 检查是否进入新节拍（标准节拍计数，用于统计）
+        int currentBeatCount = rhythmManager.CurrentBeat;
+        if (currentBeatCount > lastBeatCount)
+        {
+            Debug.Log($"[标准节拍] 进入新节拍: {currentBeatCount}, 时间: {currentTime:F3}");
+            lastBeatCount = currentBeatCount;
+        }
         
         // 检测进入行动窗口
         if (currentlyInActionWindow && !wasInActionWindow)
         {
-            // 刚进入行动窗口，重置所有标记
+            Debug.Log($"[Good Window] 进入Good Window, 时间: {currentTime:F3}, 节拍: {currentBeatCount}");
+            // 刚进入行动窗口
+            hasBeenInCurrentBeatWindow = true;
             hadInputInCurrentWindow = false;
             hadSuccessfulActionInCurrentWindow = false;
         }
         // 检测离开行动窗口
         else if (!currentlyInActionWindow && wasInActionWindow)
         {
+            Debug.Log($"[Good Window] 离开Good Window, 时间: {currentTime:F3}, 节拍: {currentBeatCount}");
+            
             // 刚离开行动窗口，检查这个节拍区间的结果
-            // 但跳过第一个节拍的检查
-            if (!isFirstBeat && !hadSuccessfulActionInCurrentWindow)
+            if (!isFirstBeat && hasBeenInCurrentBeatWindow && !hadSuccessfulActionInCurrentWindow && !hasTriedInputThisBeat)
             {
-                // 这个节拍区间内没有成功操作，计为错过（不论是否有输入尝试）
+                Debug.Log($"[情况4] 整个周期无操作，从Good Window结束时间开始下个节拍");
+                
+                // 情况4：整个周期无操作，从Good Window结束时间开始下个节拍
+                float beatInterval = rhythmManager.BeatInterval;
+                int nextStandardBeatIndex = rhythmManager.CurrentBeat + 1;
+                float nextStandardBeatTime = nextStandardBeatIndex * beatInterval;
+                float goodWindowEndTime = nextStandardBeatTime + (rhythmManager.goodWindow * beatInterval);
+                
+                currentBeatCycleEndTime = goodWindowEndTime;
+                nextBeatStartTime = goodWindowEndTime;
+                
+                Debug.Log($"[情况4] 设置周期结束时间: {currentBeatCycleEndTime:F3}, 下个节拍时间: {nextBeatStartTime:F3}");
+                
                 missedInputs++;
-                if (!hadInputInCurrentWindow)
-                {
-                    ShowTimingFeedback("错过机会", Color.gray);
-                }
-                else
-                {
-                    ShowTimingFeedback("时机错误", Color.red);
-                }
+                ShowTimingFeedback("错过机会", Color.gray);
             }
             
             // 第一个节拍结束后，取消第一节拍标记
             if (isFirstBeat)
             {
+                Debug.Log($"[第一节拍] 第一节拍结束，取消标记");
                 isFirstBeat = false;
             }
         }
@@ -218,9 +276,6 @@ public class RhythmPlayerController : MonoBehaviour
         // 处理输入
         HandleInput();
         
-        // 更新输入缓冲
-        UpdateInputBuffer();
-        
         // 更新反馈显示时间
         if (feedbackDisplayTime > 0)
             feedbackDisplayTime -= Time.deltaTime;
@@ -242,13 +297,25 @@ public class RhythmPlayerController : MonoBehaviour
 
         
         // 显示统计信息 (放大)
-        GUI.Box(new Rect(Screen.width - 400, 20, 360, 160), "玩家统计", boxStyle);
+        GUI.Box(new Rect(Screen.width - 400, 20, 360, 200), "玩家统计", boxStyle);
         GUI.Label(new Rect(Screen.width - 380, 70, 340, 40), $"成功: {goodHits}", labelStyle);
         GUI.Label(new Rect(Screen.width - 380, 110, 340, 40), $"错过: {missedInputs}", labelStyle);
         
         int totalInputs = goodHits + missedInputs;
         float accuracy = totalInputs > 0 ? (float)goodHits / totalInputs * 100f : 0f;
         GUI.Label(new Rect(Screen.width - 380, 150, 340, 40), $"准确率: {accuracy:F1}%", labelStyle);
+        
+        // 显示动态机制信息
+        float currentTime = rhythmManager != null ? rhythmManager.CurrentSongPosition : 0f;
+        float timeUntilAllowed = Mathf.Max(0f, nextAllowedInputTime - currentTime);
+        if (timeUntilAllowed > 0.01f)
+        {
+            GUI.Label(new Rect(Screen.width - 380, 190, 340, 40), $"防重复: {timeUntilAllowed:F2}s", labelStyle);
+        }
+        else
+        {
+            GUI.Label(new Rect(Screen.width - 380, 190, 340, 40), "可以操作", labelStyle);
+        }
         
         // 显示时机反馈 (放大)
         if (showTimingFeedback && feedbackDisplayTime > 0)
@@ -264,10 +331,28 @@ public class RhythmPlayerController : MonoBehaviour
         // 显示控制说明 (放大)
         GUI.Box(new Rect(20, Screen.height - 280, 400, 240), "控制说明", boxStyle);
         GUI.Label(new Rect(40, Screen.height - 230, 360, 40), "WASD / 方向键: 移动", labelStyle);
-        GUI.Label(new Rect(40, Screen.height - 190, 360, 40), "按节拍输入获得加成", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 190, 360, 40), "动态节拍模式", labelStyle);
         GUI.Label(new Rect(40, Screen.height - 150, 360, 40), $"需要节拍: {(requireBeatTiming ? "是" : "否")}", labelStyle);
         GUI.Label(new Rect(40, Screen.height - 110, 360, 40), "空格: 切换节拍要求", labelStyle);
-        GUI.Label(new Rect(40, Screen.height - 70, 360, 40), "错过: 时机不对 + 未操作", labelStyle);
+        GUI.Label(new Rect(40, Screen.height - 70, 360, 40), "随时可操作，时机决定成败", labelStyle);
+        
+        // 调试信息
+        Rect debugRect = new Rect(20, 20, 360, 150);
+        GUI.Box(debugRect, "");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 10, debugRect.width - 20, 20), 
+            $"当前时间: {rhythmManager.CurrentSongPosition:F3}s");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 30, debugRect.width - 20, 20), 
+            $"当前节拍: {rhythmManager.CurrentBeat}");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 50, debugRect.width - 20, 20), 
+            $"Good Window: {(rhythmManager.IsInActionWindow() ? "是" : "否")}");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 70, debugRect.width - 20, 20), 
+            $"本节拍已操作: {(hasTriedInputThisBeat ? "是" : "否")}");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 90, debugRect.width - 20, 20), 
+            $"周期结束时间: {currentBeatCycleEndTime:F3}s");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 110, debugRect.width - 20, 20), 
+            $"下次节拍开始: {nextBeatStartTime:F3}s");
+        GUI.Label(new Rect(debugRect.x + 10, debugRect.y + 130, debugRect.width - 20, 20), 
+            $"可输入时间: {nextAllowedInputTime:F3}s");
     }
     
     private void HandleInput()
@@ -358,65 +443,98 @@ public class RhythmPlayerController : MonoBehaviour
     {
         if (rhythmManager == null) return;
         
+        float currentTime = rhythmManager.CurrentSongPosition;
+        
+        Debug.Log($"[输入检测] 时间: {currentTime:F3}, 方向: {direction}, hasTriedInputThisBeat: {hasTriedInputThisBeat}");
+        Debug.Log($"[输入检测] nextAllowedInputTime: {nextAllowedInputTime:F3}, currentBeatCycleEndTime: {currentBeatCycleEndTime:F3}");
+        
+        // 检查是否在允许操作的时间内（仅防止重复输入）
+        if (currentTime < nextAllowedInputTime)
+        {
+            Debug.Log($"[输入拒绝] 操作过快，当前时间: {currentTime:F3} < 允许时间: {nextAllowedInputTime:F3}");
+            ShowTimingFeedback("操作过快", Color.red);
+            return;
+        }
+        
+        // 检查当前节拍是否已经尝试过输入
+        if (hasTriedInputThisBeat)
+        {
+            Debug.Log($"[输入拒绝] 本节拍已操作，hasTriedInputThisBeat: {hasTriedInputThisBeat}");
+            ShowTimingFeedback("本节拍已操作", Color.red);
+            return;
+        }
+        
+        Debug.Log($"[输入接受] 开始处理输入，设置hasTriedInputThisBeat = true");
+        
+        // 标记本节拍已尝试输入
+        hasTriedInputThisBeat = true;
+        hadInputInCurrentWindow = true;
+        
         float beatAccuracy = rhythmManager.GetBeatAccuracy();
         RhythmManager.TimingType timing = rhythmManager.EvaluateTiming(beatAccuracy);
+        bool inGoodWindow = rhythmManager.IsInActionWindow();
+        
+        Debug.Log($"[输入判定] beatAccuracy: {beatAccuracy:F3}, timing: {timing}, inGoodWindow: {inGoodWindow}");
+        
+        // 设置最小操作间隔（防止重复输入）
+        nextAllowedInputTime = currentTime + minInputInterval;
+        
+        // 计算相关时间点
+        float beatInterval = rhythmManager.BeatInterval;
+        int nextStandardBeatIndex = rhythmManager.CurrentBeat + 1;
+        float nextStandardBeatTime = nextStandardBeatIndex * beatInterval;
+        
+        Debug.Log($"[时间计算] beatInterval: {beatInterval:F3}, nextStandardBeatIndex: {nextStandardBeatIndex}, nextStandardBeatTime: {nextStandardBeatTime:F3}");
         
         // 检查是否在可行动窗口内
-        if (rhythmManager.IsInActionWindow())
+        if (inGoodWindow)
         {
-            // 立即执行移动
+            // 在Good Window内，执行移动
             float timingBonus = GetTimingBonus(timing);
             AttemptMove(direction, timingBonus, timing);
-        }
-        else if (allowEarlyInput && inputBufferTime > 0)
-        {
-            // 如果允许提前输入且有缓冲时间，则缓存输入
-            BufferInput(direction);
+            
+            if (currentTime < nextStandardBeatTime)
+            {
+                Debug.Log($"[情况2] 标准节拍时间前的Good Window内操作");
+                Debug.Log($"[情况2] 当前时间: {currentTime:F3} < 标准节拍时间: {nextStandardBeatTime:F3}");
+                
+                // 情况2：标准节拍时间前的Good Window内操作
+                // 下个节拍从标准节拍时间开始，当前周期在标准节拍时间结束
+                currentBeatCycleEndTime = nextStandardBeatTime;
+                nextBeatStartTime = nextStandardBeatTime;
+                
+                Debug.Log($"[情况2] 设置周期结束时间: {currentBeatCycleEndTime:F3}, 下个节拍时间: {nextBeatStartTime:F3}");
+            }
+            else
+            {
+                Debug.Log($"[情况3] 标准节拍时间后的Good Window内操作");
+                Debug.Log($"[情况3] 当前时间: {currentTime:F3} >= 标准节拍时间: {nextStandardBeatTime:F3}");
+                
+                // 情况3：标准节拍时间后的Good Window内操作
+                // 下个节拍从操作时间开始，当前周期立即结束
+                currentBeatCycleEndTime = currentTime;
+                nextBeatStartTime = currentTime;
+                
+                Debug.Log($"[情况3] 设置周期结束时间: {currentBeatCycleEndTime:F3}, 下个节拍时间: {nextBeatStartTime:F3}");
+            }
         }
         else
         {
-            // 输入时机不对，但不立即计错过，等节拍结束时统一处理
-            ShowTimingFeedback("时机不对", Color.red);
-        }
-    }
-    
-    private void BufferInput(Vector2Int direction)
-    {
-        bufferedInput = direction;
-        inputBufferTimer = inputBufferTime;
-        hasBufferedInput = true;
-    }
-    
-    private void UpdateInputBuffer()
-    {
-        if (!hasBufferedInput) return;
-        
-        inputBufferTimer -= Time.deltaTime;
-        
-        // 检查是否到了可以执行缓冲输入的时机
-        if (rhythmManager != null && rhythmManager.IsInActionWindow())
-        {
-            float beatAccuracy = rhythmManager.GetBeatAccuracy();
-            RhythmManager.TimingType timing = rhythmManager.EvaluateTiming(beatAccuracy);
-            float timingBonus = GetTimingBonus(timing);
+            Debug.Log($"[情况1] Good Window外操作（Miss）");
             
-            AttemptMove(bufferedInput, timingBonus, timing);
-            ClearBufferedInput();
-        }
-        else if (inputBufferTimer <= 0)
-        {
-            // 缓冲时间用完，但不计错过（在节拍结束时统一处理）
-            ClearBufferedInput();
-            ShowTimingFeedback("缓冲超时", Color.gray);
+            // 情况1：Good Window外操作（Miss）
+            // 下个节拍从标准节拍时间开始，当前周期在标准节拍时间结束
+            missedInputs++;
+            ShowTimingFeedback("时机不对", Color.red);
+            
+            currentBeatCycleEndTime = nextStandardBeatTime;
+            nextBeatStartTime = nextStandardBeatTime;
+            
+            Debug.Log($"[情况1] 设置周期结束时间: {currentBeatCycleEndTime:F3}, 下个节拍时间: {nextBeatStartTime:F3}");
         }
     }
     
-    private void ClearBufferedInput()
-    {
-        hasBufferedInput = false;
-        bufferedInput = Vector2Int.zero;
-        inputBufferTimer = 0f;
-    }
+    // 输入缓冲相关方法已移除，改为严格的节拍限制机制
     
     private void AttemptMove(Vector2Int direction, float timingBonus, RhythmManager.TimingType timing)
     {
@@ -574,8 +692,6 @@ public class RhythmPlayerController : MonoBehaviour
     {
         switch (timing)
         {
-            case RhythmManager.TimingType.Perfect:
-                return 1.5f; // 完美时机：移动速度加快50%
             case RhythmManager.TimingType.Good:
                 return 1.2f; // 良好时机：移动速度加快20%
             default:
@@ -587,7 +703,6 @@ public class RhythmPlayerController : MonoBehaviour
     {
         switch (timing)
         {
-            case RhythmManager.TimingType.Perfect:
             case RhythmManager.TimingType.Good:
                 goodHits++;
                 break;
@@ -598,7 +713,6 @@ public class RhythmPlayerController : MonoBehaviour
     {
         switch (timing)
         {
-            case RhythmManager.TimingType.Perfect:
             case RhythmManager.TimingType.Good:
                 return "Good";
             default:
@@ -610,7 +724,6 @@ public class RhythmPlayerController : MonoBehaviour
     {
         switch (timing)
         {
-            case RhythmManager.TimingType.Perfect:
             case RhythmManager.TimingType.Good:
                 return Color.green;
             default:
@@ -626,7 +739,7 @@ public class RhythmPlayerController : MonoBehaviour
     }
     
     // 节拍事件回调
-    private void OnBeat(float beatStrength)
+    private void OnBeat()
     {
         // 可以在这里添加节拍视觉效果
         // 比如让角色稍微缩放一下表示节拍
@@ -715,13 +828,18 @@ public class RhythmPlayerController : MonoBehaviour
         hadInputInCurrentWindow = false;
         hadSuccessfulActionInCurrentWindow = false;
         isFirstBeat = true;
+        hasTriedInputThisBeat = false;
+        lastBeatCount = -1;
+        
+        // 重置动态Good Window状态
+        nextAllowedInputTime = 0f;
+        hasBeenInCurrentBeatWindow = false;
+        currentBeatCycleEndTime = 0f;
+        nextBeatStartTime = 0f;
         
         // 清空时机反馈
         lastTimingFeedback = "";
         feedbackDisplayTime = 0f;
         feedbackColor = Color.white;
-        
-        // 清空缓冲输入
-        ClearBufferedInput();
     }
 } 

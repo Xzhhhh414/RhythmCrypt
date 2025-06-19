@@ -48,10 +48,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: da714f5b8a51d9842a12979396f4047a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  playerPrefab: {fileID: 8026286657119802292, guid: 8ec1b41e854859940bcd164049fb9135, type: 3}
-  playerSpawnPoint: {fileID: 1282214654925095529, guid: 8ec1b41e854859940bcd164049fb9135, type: 3}
+  playerObject: {fileID: 0}
   rhythmManager: {fileID: 9175398472823842501}
-  gameCamera: {fileID: 0}
   autoStart: 1
   gridSize: 1
 --- !u!114 &9175398472823842501
@@ -67,8 +65,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   beatsPerMinute: 115
-  perfectWindow: 0.05
-  goodWindow: 0.15
+  goodWindow: 0.2
   audioSource: {fileID: 3430232482323937077}
   useManualBPM: 1
   showDebugInfo: 1

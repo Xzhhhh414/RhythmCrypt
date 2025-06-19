@@ -5,9 +5,7 @@ using UnityEngine.Events;
 public class RhythmManager : MonoBehaviour
 {
     [Header("节拍设置")]
-    public float beatsPerMinute = 120f;
-    [Range(0.01f, 0.3f)]
-    public float perfectWindow = 0.05f;  // 完美时机窗口
+    public float beatsPerMinute = 115f;     // 修改为Disco Descent的BPM
     [Range(0.05f, 0.5f)]
     public float goodWindow = 0.15f;     // 良好时机窗口
     
@@ -20,7 +18,7 @@ public class RhythmManager : MonoBehaviour
     
     // 节拍事件
     [System.Serializable]
-    public class BeatEvent : UnityEvent<float> { }
+    public class BeatEvent : UnityEvent { }
     [System.Serializable]
     public class TimingEvent : UnityEvent<TimingType> { }
     
@@ -28,7 +26,7 @@ public class RhythmManager : MonoBehaviour
     public TimingEvent OnTimingEvaluated = new TimingEvent();
     
     // 时机判定类型
-    public enum TimingType { Miss, Good, Perfect }
+    public enum TimingType { Miss, Good }
     
     // 私有变量
     private float beatInterval;
@@ -43,6 +41,9 @@ public class RhythmManager : MonoBehaviour
     public float CurrentBeatProgress => (songPositionInBeats % 1f);
     public int CurrentBeat => currentBeat;
     public bool IsPlaying => isPlaying && audioSource.isPlaying;
+    public float BeatInterval => beatInterval;  // 节拍间隔（秒）
+    public float CurrentSongPosition => songPosition;  // 当前歌曲位置（秒）
+    public float bpm => beatsPerMinute;  // BPM属性
     
     void Start()
     {
@@ -76,7 +77,7 @@ public class RhythmManager : MonoBehaviour
         if (newBeat > currentBeat)
         {
             currentBeat = newBeat;
-            OnBeatHit(CurrentBeatProgress);
+            OnBeatHit();
         }
     }
     
@@ -107,10 +108,10 @@ public class RhythmManager : MonoBehaviour
         Rect progressRect = new Rect(beatBar.x, beatBar.y, beatBar.width * progress, beatBar.height);
         GUI.DrawTexture(progressRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
         
-        // 绘制完美时机窗口 (使用DrawTexture绘制黄色窗口)
-        float perfectStart = (1f - perfectWindow) * beatBar.width;
-        Rect perfectRect = new Rect(beatBar.x + perfectStart, beatBar.y, perfectWindow * beatBar.width, beatBar.height);
-        GUI.DrawTexture(perfectRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.yellow, 0, 0);
+        // 绘制良好时机窗口 (使用DrawTexture绘制绿色窗口)
+        float goodStart = (1f - goodWindow) * beatBar.width;
+        Rect goodRect = new Rect(beatBar.x + goodStart, beatBar.y, goodWindow * beatBar.width, beatBar.height);
+        GUI.DrawTexture(goodRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.green, 0, 0);
     }
     
     public void StartMusic()
@@ -139,12 +140,12 @@ public class RhythmManager : MonoBehaviour
         }
     }
     
-    private void OnBeatHit(float beatStrength)
+    private void OnBeatHit()
     {
-        OnBeat.Invoke(beatStrength);
+        OnBeat.Invoke();
         if (showDebugInfo)
         {
-            Debug.Log($"节拍 {currentBeat} - 强度: {beatStrength:F2}");
+            Debug.Log($"节拍 {currentBeat} | 进度: {CurrentBeatProgress:F3}");
         }
     }
     
@@ -155,10 +156,14 @@ public class RhythmManager : MonoBehaviour
     {
         float progress = CurrentBeatProgress;
         // 将进度转换为相对于节拍点的偏差
+        float accuracy;
         if (progress > 0.5f)
-            return progress - 1f; // 早于节拍
+            accuracy = progress - 1f; // 早于节拍
         else
-            return progress; // 晚于节拍
+            accuracy = progress; // 晚于节拍
+            
+        //Debug.Log($"[RhythmManager] GetBeatAccuracy: progress={progress:F3}, accuracy={accuracy:F3}");
+        return accuracy;
     }
     
     /// <summary>
@@ -169,12 +174,12 @@ public class RhythmManager : MonoBehaviour
         float absAccuracy = Mathf.Abs(accuracy);
         
         TimingType timing;
-        if (absAccuracy <= perfectWindow)
-            timing = TimingType.Perfect;
-        else if (absAccuracy <= goodWindow)
+        if (absAccuracy <= goodWindow)
             timing = TimingType.Good;
         else
             timing = TimingType.Miss;
+            
+        Debug.Log($"[RhythmManager] EvaluateTiming: accuracy={accuracy:F3}, absAccuracy={absAccuracy:F3}, goodWindow={goodWindow:F3}, timing={timing}");
             
         OnTimingEvaluated.Invoke(timing);
         return timing;
@@ -185,6 +190,12 @@ public class RhythmManager : MonoBehaviour
     /// </summary>
     public bool IsInActionWindow()
     {
-        return Mathf.Abs(GetBeatAccuracy()) <= goodWindow;
+        float accuracy = GetBeatAccuracy();  
+        float absAccuracy = Mathf.Abs(accuracy);
+        bool inWindow = absAccuracy <= goodWindow;
+        
+        Debug.Log($"[RhythmManager] IsInActionWindow: accuracy={accuracy:F3}, absAccuracy={absAccuracy:F3}, goodWindow={goodWindow:F3}, inWindow={inWindow}");
+        
+        return inWindow;
     }
 } 
